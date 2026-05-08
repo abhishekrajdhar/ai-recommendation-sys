@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: shl-assessment-recommender
+    env: docker
+    plan: starter
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: LLM_PROVIDER
+        value: openai
+      - key: OPENAI_MODEL
+        value: gpt-4.1-mini
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash

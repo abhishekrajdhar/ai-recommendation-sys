@@ -1,0 +1,2 @@
+"""SHL catalog scraper."""
+

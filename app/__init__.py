@@ -1,0 +1,2 @@
+"""SHL assessment recommender application."""
+
