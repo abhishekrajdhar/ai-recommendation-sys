@@ -81,6 +81,15 @@ class HybridRetriever:
         seen: set[str] = set()
         assessments: list[Assessment] = []
         for item in raw:
+            # Backwards-compatibility: older catalog records may use `link` instead of `url`.
+            if "url" not in item and "link" in item:
+                item["url"] = item.get("link")
+
+            # If still missing or empty, skip early with a clear message.
+            if not item.get("url"):
+                logger.warning("Skipping catalog item without url: %s", item.get("name"))
+                continue
+
             try:
                 assessment = Assessment.model_validate(item)
             except Exception as exc:

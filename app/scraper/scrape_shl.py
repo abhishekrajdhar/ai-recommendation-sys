@@ -554,6 +554,8 @@ def parse_product_page(
         "entity_id": entity_id,
         "name": name,
         "link": normalize_url(url),
+        # keep `url` key for compatibility with the rest of the app
+        "url": normalize_url(url),
         "scraped_at": datetime.now(
             timezone.utc
         ).isoformat(),
@@ -572,8 +574,11 @@ def parse_product_page(
         "duration": duration,
         "duration_raw": duration_raw,
         "duration_minutes": duration_minutes,
+        # both normalized boolean-like flags and the original label are useful
         "remote": remote,
         "adaptive": adaptive,
+        "remote_testing": remote_raw,
+        "adaptive_support": adaptive_raw,
         "status": "ok",
         "retrieval_text": clean_text(retrieval_text),
     }
