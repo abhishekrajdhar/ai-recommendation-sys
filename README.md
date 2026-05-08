@@ -1,4 +1,4 @@
-# SHL Assessment Recommender Agent
+#Recommender Agent
 
 Production-ready FastAPI service for a stateless conversational SHL assessment recommender. It scrapes SHL Individual Test Solutions, indexes the catalog with BM25 plus FAISS semantic retrieval, and uses deterministic agent routing so it clarifies, recommends, refines, compares, or refuses predictably.
 
