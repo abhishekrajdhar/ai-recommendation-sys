@@ -1,0 +1,35 @@
+[
+  {
+    "query": "Hiring a mid-level Java developer",
+    "relevant_urls": [
+      "https://www.shl.com/products/product-catalog/view/java-8-new/",
+      "https://www.shl.com/products/product-catalog/view/core-java-advanced-level-new/"
+    ]
+  },
+  {
+    "query": "Need a Python coding assessment",
+    "relevant_urls": [
+      "https://www.shl.com/products/product-catalog/view/python-new/",
+      "https://www.shl.com/products/product-catalog/view/programming-concepts/"
+    ]
+  },
+  {
+    "query": "Graduate aptitude test numerical reasoning",
+    "relevant_urls": [
+      "https://www.shl.com/products/product-catalog/view/global-skills-development-report/",
+      "https://www.shl.com/products/product-catalog/view/gsa/"
+    ]
+  },
+  {
+    "query": "Account Manager hiring",
+    "relevant_urls": [
+      "https://www.shl.com/products/product-catalog/view/account-manager-solution/"
+    ]
+  },
+  {
+    "query": "Situational judgement for supervisors",
+    "relevant_urls": [
+      "https://www.shl.com/products/product-catalog/view/situational-judgement/"
+    ]
+  }
+]
