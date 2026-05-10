@@ -5,10 +5,11 @@ from app.services.comparison import compare_from_catalog, is_comparison_query
 from app.services.guardrails import should_refuse
 from app.services.llm_client import OptionalLLMClient
 from app.services.prompts import REFUSAL_MESSAGE
-from app.services.retrieval import HybridRetriever, get_retriever
+from app.services.retrieval import HybridRetriever, get_retriever, TECH_DOMAIN_KEYWORDS
 from app.services.state_extractor import extract_state, missing_context_questions
 import logging
 import hashlib
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,10 @@ class SHLAgent:
             # If any assessment-type preference is explicitly set, proceed to retrieval
             if s.needs_personality or s.needs_cognitive or s.needs_technical:
                 return False
+            # If the role or query is clearly technical, proceed to retrieval (don't ask seniority)
+            role_lower = (s.role or "").lower()
+            if any(k in role_lower for k in TECH_DOMAIN_KEYWORDS):
+                return False
             # Otherwise prefer clarification (ask seniority / assessment focus)
             return True
 
@@ -166,24 +171,60 @@ class SHLAgent:
                 end_of_conversation=True,
             )
 
-        recommendations = _recommendation_models(assessments)
+        # Group assessments into primary (exact skill/name matches) and secondary (similar)
+        query_text = state.retrieval_query() or latest
+        q_tokens = set(t for t in re.split(r"\W+", query_text.lower()) if t)
+
+        primary_assessments = []
+        secondary_assessments = []
+
+        for a in assessments:
+            name_lower = a.name.lower()
+            skills = [s.lower() for s in (getattr(a, "skills_measured", []) or [])]
+
+            # Primary if any query token exactly matches a skill token or appears in the assessment name
+            is_primary = any(tok in skills for tok in q_tokens) or any(tok in name_lower for tok in q_tokens)
+
+            if is_primary:
+                primary_assessments.append(a)
+            else:
+                secondary_assessments.append(a)
+
+        # If nothing matched as primary, promote the top result as primary
+        if not primary_assessments and assessments:
+            primary_assessments = [assessments[0]]
+            secondary_assessments = [a for a in assessments[1:]]
+
+        # Build Recommendation models with primary first
+        recommendations = _recommendation_models(primary_assessments + secondary_assessments)
+
+        # Compose deterministic reply when LLM is disabled; otherwise prefer LLM wording
         llm_reply = self.llm_client.recommendation_reply(state, assessments)
-        names = ", ".join(item.name for item in recommendations[:5])
-        # If the LLM is disabled, generate a varied deterministic reply using templates.
+
         if llm_reply:
             reply = llm_reply
         else:
-            templates = [
-                "Based on the role and requirements, I recommend these SHL Individual Test Solutions: {names}. These are grounded in the indexed catalog; you can refine by adding or excluding personality, cognitive, technical, remote, or seniority requirements.",
-                "Here are some SHL Individual Test Solutions that match the role and requirements: {names}. You can refine the results by specifying seniority, or by including/excluding personality, cognitive, or technical assessments.",
-                "I found these assessments that align with the role: {names}. If you want more tailored options, tell me the seniority level or whether you prefer personality, cognitive or technical assessments.",
-                "Recommended based on the information provided: {names}. To refine further, add seniority, remote-testing needs, or indicate whether personality/cognitive/technical assessments should be prioritized.",
-            ]
+            primary_names = ", ".join(a.name for a in primary_assessments[:5])
+            secondary_names = ", ".join(a.name for a in secondary_assessments[:5])
 
-            # Choose a template deterministically based on the query context so responses vary across different queries
-            seed = (names + (state.role or "")).encode("utf-8")
-            idx = int(hashlib.md5(seed).hexdigest(), 16) % len(templates)
-            reply = templates[idx].format(names=names)
+            if secondary_names:
+                templates = [
+                    "Primary recommendation(s): {primary}. You can also explore similar assessments: {secondary}. To refine, tell me seniority or whether you prefer personality/cognitive/technical tests.",
+                    "I recommend: {primary}. Other similar options you might consider: {secondary}. Specify seniority or assessment focus to refine.",
+                    "Top pick(s): {primary}. You may also explore: {secondary}. Mention seniority or type (personality/cognitive/technical) for a tighter match.",
+                ]
+                seed = (primary_names + secondary_names + (state.role or "")).encode("utf-8")
+                idx = int(hashlib.md5(seed).hexdigest(), 16) % len(templates)
+                reply = templates[idx].format(primary=primary_names, secondary=secondary_names)
+            else:
+                templates = [
+                    "Based on the role and requirements, I recommend these SHL Individual Test Solutions: {primary}. You can refine by seniority or assessment focus (personality/cognitive/technical).",
+                    "Recommended: {primary}. To refine further, add seniority, remote-testing needs, or indicate whether personality/cognitive/technical assessments should be prioritized.",
+                ]
+                seed = (primary_names + (state.role or "")).encode("utf-8")
+                idx = int(hashlib.md5(seed).hexdigest(), 16) % len(templates)
+                reply = templates[idx].format(primary=primary_names)
+
         return ChatResponse(
             reply=reply,
             recommendations=recommendations,
