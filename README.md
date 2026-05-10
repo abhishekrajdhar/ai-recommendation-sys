@@ -146,23 +146,51 @@ The bundled sample catalog lets the service and tests run before live scraping. 
 
 ## Evaluation
 
-Run tests:
+Automated tests
+
+Run the unit and integration tests with pytest:
 
 ```bash
 pytest
 ```
 
-The test suite includes at least 15 automated checks covering:
+The test suite includes automated checks for clarification, refinement handling, grounded comparison behavior, prompt-injection resistance, refusal conditions, schema stability, and a small retrieval recall check.
 
-- vague query clarification
-- refinement handling
-- grounded comparison
-- hallucination prevention
-- prompt injection resistance
-- off-topic refusal
-- legal and general hiring refusal
-- schema stability
-- Recall@10 for a known catalog item
+Evaluation harness (retrieval + grounding)
+
+This repository includes a lightweight evaluation harness used during development to measure retrieval quality against a small seeded ground-truth. The harness lives at `scripts/evaluate_retrieval.py` and the sample ground-truth is `app/tests/ground_truth.json`.
+
+What it computes
+
+- Recall@k (how often a ground-truth URL appears in the top-k results)
+- Precision@k (ratio of relevant results in the top-k)
+- MRR (Mean Reciprocal Rank) to summarize ranking position
+- Per-query printed top-k result lists for manual inspection
+
+How to run the harness
+
+Run the evaluation script from the repository root (the script will import local modules, so set PYTHONPATH to the repo root):
+
+```bash
+PYTHONPATH=. python3 scripts/evaluate_retrieval.py
+```
+
+The script prints per-query top-k results and a small summary table with aggregated Recall@1/3/5/10, Precision@k, and MRR. Use the printed per-query lists to inspect common failure modes (domain mismatch, underspecified queries, noisy metadata).
+
+Recommended next steps for evaluation
+
+- Expand `app/tests/ground_truth.json` from the current seed (5 queries) to a larger set (50–300 queries) covering core domains (technical, personality, situational, finance, graduate) to get statistically meaningful metrics.
+- Add a groundedness check: verify that returned recommendations cite catalog text (e.g., skills or categories appear in the retrieved record) and surface a groundedness score per reply.
+- Add semantic-similarity diagnostics: average cosine similarity of returned items to the query embedding to spot weak semantic matches.
+- Add a CI job that runs the evaluation harness and fails when Recall@10 or MRR fall below desired thresholds.
+
+Interpretation guidance
+
+- Low Recall@k indicates missing or poorly indexed catalog items or that retrieval signals (BM25/embeddings) need tuning.
+- Low MRR shows relevant items are ranked too low — tune exact-skill boosting and reranker penalties/thresholds.
+- Discrepancies between precision and recall can indicate noisy catalog metadata; improving `retrieval_text` (skills, job levels, categories) usually helps.
+
+If you'd like, I can add an expanded ground-truth file, a small groundedness checker script, or a GitHub Action that runs the harness on PRs and fails the build when metrics regress.
 
 ## Docker
 
@@ -176,6 +204,57 @@ Production startup command:
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
+
+Docker: notes and recommended workflows
+
+There are two common Docker workflows depending on whether you prebuild catalog/index artifacts or build them inside the image.
+
+1) Recommended — prebuild artifacts locally (fast startup)
+
+- Generate catalog and vectorstore locally (or in CI) and place them under the repo before building the image:
+
+```bash
+python -m app.scraper.scrape_shl --output app/data/shl_catalog.json --use-json-catalog
+python scripts/build_index.py
+```
+
+- Build the Docker image (artifacts already present in `app/data` and `app/vectorstore`):
+
+```bash
+docker build -t shl-recommender:latest .
+```
+
+- Run the container with your environment file:
+
+```bash
+docker run -p 8000:8000 --env-file .env shl-recommender:latest
+```
+
+This avoids downloading model weights or building FAISS during container start and gives fastest boot times.
+
+2) Build-in-image (convenient but slower and resource heavy)
+
+- If you prefer the image to produce the catalog and index during build, ensure the `Dockerfile` runs the scraper and index builder during the Docker build. This requires longer build times and (optionally) `HF_TOKEN` available as a build-arg or secret.
+
+- Example Build Command (may take several minutes):
+
+```bash
+docker build -t shl-recommender:latest .
+```
+
+Notes:
+- If you build artifacts inside the image, provide `HF_TOKEN` (as a build secret or env var) to speed up model downloads and avoid rate limits.
+- For local development, you can mount the `app/data` and `app/vectorstore` directories into the container so you don't need to rebuild the image after updating the catalog:
+
+```bash
+docker run -v "$(pwd)/app/data:/app/data" -v "$(pwd)/app/vectorstore:/app/vectorstore" -p 8000:8000 --env-file .env shl-recommender:latest
+```
+
+- Health check URL: `http://localhost:8000/health` (same as the Render health check).
+
+Troubleshooting
+- If the container fails to start due to FAISS or embedding model errors, verify the vectorstore files exist at `app/vectorstore/` and that the catalog JSON path points to a valid file.
+- If model downloads are slow or fail, set `HF_TOKEN` as an env var to enable authenticated downloads with higher rate limits.
 
 ## Render Deployment
 
