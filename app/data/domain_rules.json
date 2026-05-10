@@ -1,0 +1,22 @@
+{
+  "technical": {
+    "deny": ["cashier", "bookkeeping", "accounts", "accounting", "auditing", "retail", "clerk", "receptionist"],
+    "allow": ["java", "python", "sql", "programming", "coding", "software", "engineer", "developer"]
+  },
+  "leadership": {
+    "deny": ["cashier", "cashier solution", "clerk"],
+    "allow": ["leadership", "manager", "supervisor", "people manager", "stakeholder"]
+  },
+  "graduate": {
+    "deny": ["senior", "executive", "director"],
+    "allow": ["graduate", "entry level", "junior"]
+  },
+  "finance": {
+    "deny": ["developer", "programming", "java", "python"],
+    "allow": ["accounting", "bookkeeping", "accounts", "finance", "auditing", "bank", "banking", "branch", "teller", "operations", "account manager", "bank manager", "banking operations"]
+  },
+  "sales": {
+    "deny": ["developer", "programming", "java"],
+    "allow": ["sales", "sales representative", "sales achievement", "customer service"]
+  }
+}

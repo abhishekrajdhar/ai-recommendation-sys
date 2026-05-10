@@ -7,6 +7,10 @@ from app.services.llm_client import OptionalLLMClient
 from app.services.prompts import REFUSAL_MESSAGE
 from app.services.retrieval import HybridRetriever, get_retriever
 from app.services.state_extractor import extract_state, missing_context_questions
+import logging
+import hashlib
+
+logger = logging.getLogger(__name__)
 
 MAX_TURNS = 8
 
@@ -47,6 +51,38 @@ def _filter_by_requested_types(assessments, state):
     return filtered or assessments
 
 
+def _ensure_requested_types_included(assessments: list, state, retriever: HybridRetriever) -> list:
+
+    included = assessments[:]
+
+    def _has_personality(items):
+        return any("personality" in (a.test_type or "").lower() for a in items)
+
+    def _has_cognitive(items):
+        return any("cognitive" in (a.test_type or "").lower() for a in items)
+
+    # If personality explicitly requested but not present, try to find one
+    if getattr(state, "needs_personality", False) and not _has_personality(included):
+
+        for a in retriever.assessments:
+            if a in included:
+                continue
+            if any(term in a.searchable_text().lower() for term in ["personality", "behavioral", "opq"]):
+                included.append(a)
+                break
+
+    if getattr(state, "needs_cognitive", False) and not _has_cognitive(included):
+
+        for a in retriever.assessments:
+            if a in included:
+                continue
+            if any(term in a.searchable_text().lower() for term in ["cognitive", "ability", "gsa", "aptitude"]):
+                included.append(a)
+                break
+
+    return included
+
+
 class SHLAgent:
     def __init__(self, retriever: HybridRetriever | None = None) -> None:
         self.retriever = retriever or get_retriever()
@@ -69,6 +105,39 @@ class SHLAgent:
             )
 
         state = extract_state(messages)
+        logger.info("extracted state=%s", state.model_dump())
+        logger.debug("DEBUG_STATE %s", state.model_dump())
+        # Clarification-first routing: if we have a role but lack seniority
+        # and the user hasn't expressed an assessment-type preference (personality/cognitive/technical),
+        # prefer to ask a clarification question before performing retrieval. This prevents
+        # over-aggressive filtering and weak retrieval from returning a small or irrelevant set.
+        def _clarification_first(s):
+            # Must have a role to clarify about seniority/assessment intent
+            if not s.role:
+                return False
+            # If seniority is already provided, no clarification needed
+            if s.seniority:
+                return False
+            # If any assessment-type preference is explicitly set, proceed to retrieval
+            if s.needs_personality or s.needs_cognitive or s.needs_technical:
+                return False
+            # Otherwise prefer clarification (ask seniority / assessment focus)
+            return True
+
+        if _clarification_first(state):
+            questions = missing_context_questions(state)
+            # Prepend a focused seniority prompt when role is present
+            focused = "Could you tell me the seniority level you are hiring for (Junior, Mid, Senior)?"
+            # missing_context_questions already asks about assessment focus; include it as well
+            reply = focused + " " + " ".join(questions)
+            return ChatResponse(
+                reply=reply,
+                recommendations=[],
+                end_of_conversation=_turn_count(messages) >= MAX_TURNS,
+            )
+
+        # If we don't have the minimum context at all (e.g., "I need an assessment"),
+        # ask the generic missing-context questions and do not attempt retrieval.
         if not state.has_minimum_context():
             questions = missing_context_questions(state)
             reply = "To recommend the right SHL assessments, I need a bit more context. " + " ".join(questions)
@@ -80,7 +149,13 @@ class SHLAgent:
 
         query = state.retrieval_query() or latest
         assessments = self.retriever.search(query, state=state, initial_k=20, limit=10)
+        logger.info("retriever returned %d assessments", len(assessments))
+        logger.info("retriever.names=%s", [a.name for a in assessments])
+        logger.debug("DEBUG_CANDIDATES %s", [a.name for a in assessments])
         assessments = _filter_by_requested_types(assessments, state)[:10]
+        assessments = _ensure_requested_types_included(assessments, state, self.retriever)[:10]
+        logger.info("after type filter names=%s", [a.name for a in assessments])
+        logger.debug("DEBUG_AFTER_FILTER %s", [a.name for a in assessments])
         if not assessments:
             return ChatResponse(
                 reply=(
@@ -94,11 +169,21 @@ class SHLAgent:
         recommendations = _recommendation_models(assessments)
         llm_reply = self.llm_client.recommendation_reply(state, assessments)
         names = ", ".join(item.name for item in recommendations[:5])
-        reply = llm_reply or (
-            f"Based on the role and requirements, I recommend these SHL Individual Test Solutions: {names}. "
-            "These are grounded in the indexed catalog; you can refine by adding or excluding personality, "
-            "cognitive, technical, remote, or seniority requirements."
-        )
+        # If the LLM is disabled, generate a varied deterministic reply using templates.
+        if llm_reply:
+            reply = llm_reply
+        else:
+            templates = [
+                "Based on the role and requirements, I recommend these SHL Individual Test Solutions: {names}. These are grounded in the indexed catalog; you can refine by adding or excluding personality, cognitive, technical, remote, or seniority requirements.",
+                "Here are some SHL Individual Test Solutions that match the role and requirements: {names}. You can refine the results by specifying seniority, or by including/excluding personality, cognitive, or technical assessments.",
+                "I found these assessments that align with the role: {names}. If you want more tailored options, tell me the seniority level or whether you prefer personality, cognitive or technical assessments.",
+                "Recommended based on the information provided: {names}. To refine further, add seniority, remote-testing needs, or indicate whether personality/cognitive/technical assessments should be prioritized.",
+            ]
+
+            # Choose a template deterministically based on the query context so responses vary across different queries
+            seed = (names + (state.role or "")).encode("utf-8")
+            idx = int(hashlib.md5(seed).hexdigest(), 16) % len(templates)
+            reply = templates[idx].format(names=names)
         return ChatResponse(
             reply=reply,
             recommendations=recommendations,

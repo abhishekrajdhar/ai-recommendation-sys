@@ -4,6 +4,9 @@ import re
 
 from app.models.schemas import Assessment
 from app.services.retrieval import HybridRetriever
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def is_comparison_query(text: str) -> bool:
@@ -63,7 +66,9 @@ def build_comparison(assessments: list[Assessment]) -> str:
 
 def compare_from_catalog(text: str, retriever: HybridRetriever) -> tuple[str, list[Assessment]]:
     names = extract_comparison_names(text)
+    logger.info("comparison.extract names=%s", names)
     assessments = retriever.find_by_names(names)
+    logger.info("comparison.found=%s", [a.name for a in assessments])
     if len(assessments) < 2:
         return (
             "I can compare SHL assessments when I can identify at least two catalog items. "

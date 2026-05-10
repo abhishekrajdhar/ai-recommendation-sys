@@ -19,7 +19,7 @@ from app.models.schemas import Assessment
 logger = logging.getLogger(__name__)
 
 # PUBLIC SHL CATALOG URL
-CATALOG_URL = "https://www.shl.com/solutions/products/product-catalog/"
+CATALOG_URL = "https://tcp-us-prod-rnd.shl.com/voiceRater/shl-ai-hiring/shl_product_catalog.json"
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT = ROOT / "app" / "data" / "shl_catalog.json"
@@ -153,29 +153,142 @@ def discover_product_urls(
 
         logger.info("Scanning catalog page: %s", url)
 
+        page_links = []
+
+        # Try to fetch raw response so we can handle JSON catalog endpoints
         try:
-            soup = fetch(session, url)
+            resp = session.get(url, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
 
         except requests.RequestException as exc:
             logger.warning("Failed page %s: %s", url, exc)
             continue
 
-        page_links = []
+        # If the catalog endpoint returns JSON (new dataset), extract URLs from JSON
+        try:
+            # try strict JSON first
+            data = resp.json()
 
-        for anchor in soup.select("a[href]"):
+            def looks_like_product_path(s: str) -> bool:
+                lowered = s.lower()
+                return any(
+                    token in lowered
+                    for token in (
+                        "product-catalog",
+                        "product-catalog/view",
+                        "products/product-catalog",
+                        "/products/",
+                        "shl.com/products",
+                        "product-catalog/view",
+                    )
+                )
 
-            href = anchor.get("href", "")
-            text = clean_text(anchor.get_text(" "))
+            def extract_urls_from_json(node) -> list[str]:
+                urls = []
 
-            full_url = normalize_url(
-                urljoin(CATALOG_URL, href)
-            )
+                if isinstance(node, dict):
+                    for k, v in node.items():
+                        # common key names that may contain URLs or paths
+                        if isinstance(v, str):
+                            if looks_like_product_path(v) or k.lower() in ("url", "href", "link", "path", "slug", "permalink", "permalink_path", "canonicalurl"):
+                                urls.append(v)
+                        elif isinstance(v, (dict, list)):
+                            urls.extend(extract_urls_from_json(v))
+                elif isinstance(node, list):
+                    for item in node:
+                        urls.extend(extract_urls_from_json(item))
 
-            if is_individual_solution_link(full_url, text):
+                return urls
 
-                if full_url not in seen:
-                    seen.add(full_url)
-                    page_links.append(full_url)
+            candidate_urls = extract_urls_from_json(data)
+
+            logger.info("Found %d candidate URLs in JSON on page %s", len(candidate_urls), page)
+
+            for raw in candidate_urls:
+                # sanitize and join relative paths
+                if not isinstance(raw, str):
+                    continue
+
+                raw = raw.strip()
+
+                # Sometimes values are HTML fragments or JSON-escaped strings; try to extract hrefs
+                href_match = re.search(r'href\s*=\s*"([^"]+)"', raw)
+
+                if href_match:
+                    raw = href_match.group(1)
+
+                full_url = normalize_url(urljoin(CATALOG_URL, raw))
+
+                # keep the same filtering heuristic as HTML discovery
+                if is_individual_solution_link(full_url, ""):
+                    if full_url not in seen:
+                        seen.add(full_url)
+                        page_links.append(full_url)
+
+        except ValueError:
+            # Try to be tolerant: remove problematic control characters and retry
+            try:
+                cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", resp.text)
+                data = json.loads(cleaned)
+
+                candidate_urls = extract_urls_from_json(data)
+
+                logger.info("Found %d candidate URLs after cleaning JSON on page %s", len(candidate_urls), page)
+
+            except Exception:
+                # Last resort: extract "link", "url", "href" values with a regex from the raw text
+                candidate_urls = []
+
+                for pattern in (r'"link"\s*:\s*"([^"]+)"', r'"url"\s*:\s*"([^"]+)"', r'"href"\s*:\s*"([^"]+)"'):
+                    found = re.findall(pattern, resp.text)
+                    if found:
+                        candidate_urls.extend(found)
+
+                logger.info("Found %d candidate URLs by regex on page %s", len(candidate_urls), page)
+
+                # Normalize duplicates
+                candidate_urls = list(dict.fromkeys(candidate_urls))
+
+                for raw in candidate_urls:
+                    if not isinstance(raw, str):
+                        continue
+
+                    raw = raw.strip()
+
+                    href_match = re.search(r'href\s*=\s*"([^"]+)"', raw)
+
+                    if href_match:
+                        raw = href_match.group(1)
+
+                    full_url = normalize_url(urljoin(CATALOG_URL, raw))
+
+                    if is_individual_solution_link(full_url, ""):
+                        if full_url not in seen:
+                            seen.add(full_url)
+                            page_links.append(full_url)
+
+                # If we got candidates via regex, skip the HTML fallback below
+                if page_links:
+                    # proceed to next page handling
+                    pass
+                else:
+                    # Not JSON-parsable and regex didn't find product links; fallback to HTML parsing
+                    soup = BeautifulSoup(resp.text, "html.parser")
+
+                    for anchor in soup.select("a[href]"):
+
+                        href = anchor.get("href", "")
+                        text = clean_text(anchor.get_text(" "))
+
+                        full_url = normalize_url(
+                            urljoin(CATALOG_URL, href)
+                        )
+
+                        if is_individual_solution_link(full_url, text):
+
+                            if full_url not in seen:
+                                seen.add(full_url)
+                                page_links.append(full_url)
 
         if not page_links:
             logger.info("No more product links found.")
@@ -286,16 +399,19 @@ def parse_duration_minutes(text: str) -> int | None:
 def map_test_type(text: str) -> str:
     lowered = text.lower()
 
-    if any(
-        word in lowered
-        for word in [
-            "personality",
-            "behavior",
-            "behaviour",
-            "opq",
-        ]
-    ):
-        return "P"
+    if any(k in lowered for k in ["personality", "opq"]):
+        return "Personality"
+
+    if any(k in lowered for k in ["cognitive", "ability", "aptitude", "reasoning", "gsa"]):
+        return "Cognitive"
+
+    if any(k in lowered for k in ["technical", "coding", "software", "skill", "knowledge", "java", "python", ".net", "c#"]):
+        return "Technical"
+
+    if any(k in lowered for k in ["situational", "judgment", "judgement", "sjq", "situational judgement"]):
+        return "Situational Judgment"
+
+    return "General"
 
     if any(
         word in lowered
@@ -503,32 +619,15 @@ def parse_product_page(
         assessment_type,
     )
 
-    retrieval_text = f"""
-    Assessment Name: {name}
-
-    Description:
-    {description}
-
-    Assessment Type:
-    {assessment_type}
-
-    Skills:
-    {", ".join(skills)}
-
-    Job Levels:
-    {", ".join(job_levels)}
-
-    Languages:
-    {", ".join(languages)}
-
-    Category:
-    {category}
-
-    Taxonomy:
-    {", ".join(taxonomy_categories)}
-    """
-
-    # ENTITY ID
+    retrieval_text = (
+        f"Assessment Name: {name}\n\n"
+        f"Description:\n{description}\n\n"
+        f"Skills:\n{', '.join(skills)}\n\n"
+        f"Job Levels:\n{', '.join(job_levels)}\n\n"
+        f"Categories:\n{', '.join(taxonomy_categories)}\n\n"
+        f"Test Type:\n{test_type}\n\n"
+        f"Remote:\n{remote}"
+    )
 
     entity_id = ""
 
@@ -621,21 +720,187 @@ def parse_product_page(
 def scrape_catalog(
     output_path: Path = DEFAULT_OUTPUT,
     max_pages: int = 50,
+    use_json_catalog: bool = False,
 ) -> list[dict]:
 
     session = create_session()
 
-    urls = discover_product_urls(
-        session,
-        max_pages=max_pages,
-    )
+    assessments: list[dict] = []
 
-    logger.info(
-        "Discovered %d product URLs",
-        len(urls),
-    )
+    # Fast path: if the catalog URL returns a JSON array of full product records,
+    # normalize and validate them directly (avoids fetching each product page).
+    try:
+        resp = session.get(CATALOG_URL, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
 
-    assessments = []
+        json_data = None
+
+        try:
+            json_data = resp.json()
+        except Exception:
+            # try to clean control characters and parse again
+            json_data = None
+            try:
+                cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", resp.text)
+                json_data = json.loads(cleaned)
+            except Exception:
+                # As a last resort, extract "link"/"url" values with regex and build minimal records
+                candidate_urls = []
+                for pattern in (r'"link"\s*:\s*"([^"]+)"', r'"url"\s*:\s*"([^"]+)"', r'"href"\s*:\s*"([^"]+)"'):
+                    found = re.findall(pattern, resp.text)
+                    if found:
+                        candidate_urls.extend(found)
+
+                candidate_urls = list(dict.fromkeys(candidate_urls))
+
+                if candidate_urls:
+                    logger.info("Built %d minimal JSON records from regex links", len(candidate_urls))
+                    json_data = [{"link": u} for u in candidate_urls]
+
+        if json_data and isinstance(json_data, list) and (use_json_catalog or any(isinstance(i, dict) and (i.get("link") or i.get("entity_id")) for i in json_data[:5])):
+            logger.info("Using JSON fast-path: processing %d entries from catalog JSON", len(json_data))
+
+            def normalize_from_item(item: dict) -> dict | None:
+                try:
+                    url_val = item.get("link") or item.get("url") or ""
+                    url_norm = normalize_url(urljoin(CATALOG_URL, str(url_val))) if url_val else ""
+
+                    # If the JSON item doesn't contain name/description, try to fetch the
+                    # actual product page and parse it to produce a full record.
+                    if url_norm and (not item.get("name") or not item.get("description")):
+                        try:
+                            soup = fetch(session, url_norm)
+                            parsed = parse_product_page(url_norm, soup)
+                            if parsed:
+                                return parsed
+                        except Exception as exc:
+                            logger.debug("Failed to enrich JSON entry by fetching page %s: %s", url_norm, exc)
+
+                    name = clean_text(item.get("name") or "")
+                    description = clean_text(item.get("description") or "")
+
+                    assessment_type = clean_text(item.get("assessment_type") or item.get("type") or "")
+
+                    duration_raw = item.get("duration_raw") or item.get("duration") or ""
+                    duration = clean_text(duration_raw)
+                    duration_minutes = parse_duration_minutes(duration_raw)
+
+                    remote_raw = item.get("remote") or item.get("remote_testing") or ""
+                    remote = bool_yes_no(str(remote_raw))
+
+                    adaptive_raw = item.get("adaptive") or item.get("adaptive_support") or ""
+                    adaptive = bool_yes_no(str(adaptive_raw))
+
+                    job_levels = item.get("job_levels") or split_values(item.get("job_levels_raw") or "")
+                    job_levels_raw = item.get("job_levels_raw") or (", ".join(job_levels) if job_levels else "")
+
+                    skills = item.get("skills_measured") or split_values(item.get("skills_raw") or "")
+                    skills_raw = item.get("skills_raw") or (", ".join(skills) if skills else "")
+
+                    languages = item.get("languages") or split_values(item.get("languages_raw") or "")
+                    languages_raw = item.get("languages_raw") or (", ".join(languages) if languages else "")
+
+                    taxonomy_categories = item.get("taxonomy_categories") or split_values(item.get("taxonomy_raw") or "")
+                    taxonomy_raw = item.get("taxonomy_raw") or (", ".join(taxonomy_categories) if taxonomy_categories else "")
+
+                    test_type = map_test_type(f"{assessment_type} {name} {description}")
+
+                    category = infer_category(name, description, assessment_type)
+
+                    entity_id = str(item.get("entity_id") or item.get("id") or "")
+
+                    # Skip records missing required fields (after attempted enrichment)
+                    if not name or not url_norm:
+                        logger.info("Skipping JSON entry due to missing name or url (entity_id=%s)", entity_id)
+                        return None
+
+                    retrieval_text = (
+                        f"Assessment Name: {name}\n\n"
+                        f"Description:\n{description}\n\n"
+                        f"Skills:\n{', '.join(skills)}\n\n"
+                        f"Job Levels:\n{', '.join(job_levels)}\n\n"
+                        f"Categories:\n{', '.join(taxonomy_categories)}\n\n"
+                        f"Test Type:\n{test_type}\n\n"
+                        f"Remote:\n{remote}"
+                    )
+
+                    record = {
+                        "entity_id": entity_id,
+                        "name": name,
+                        "link": url_norm,
+                        "url": url_norm,
+                        "scraped_at": datetime.now(timezone.utc).isoformat(),
+                        "description": description,
+                        "assessment_type": assessment_type,
+                        "test_type": test_type,
+                        "category": category,
+                        "job_levels": job_levels,
+                        "job_levels_raw": job_levels_raw,
+                        "skills_measured": skills,
+                        "skills_raw": skills_raw,
+                        "languages": languages,
+                        "languages_raw": languages_raw,
+                        "taxonomy_categories": taxonomy_categories,
+                        "taxonomy_raw": taxonomy_raw,
+                        "duration": duration,
+                        "duration_raw": duration_raw,
+                        "duration_minutes": duration_minutes,
+                        "remote": remote,
+                        "adaptive": adaptive,
+                        "remote_testing": remote_raw,
+                        "adaptive_support": adaptive_raw,
+                        "status": item.get("status") or "ok",
+                        "retrieval_text": clean_text(retrieval_text),
+                    }
+
+                    # Validate shape with pydantic
+                    Assessment(
+                        name=record["name"],
+                        url=record["link"],
+                        description=record["description"],
+                        assessment_type=record["assessment_type"],
+                        duration=record["duration"],
+                        remote_testing=record["remote"],
+                        adaptive_support=record["adaptive"],
+                        job_levels=record["job_levels"],
+                        skills_measured=record["skills_measured"],
+                        languages=record["languages"],
+                        category=record["category"],
+                    )
+
+                    return record
+
+                except Exception as exc:
+                    logger.warning("Skipping malformed JSON entry (entity_id=%s): %s", item.get("entity_id"), exc)
+                    return None
+
+            for item in json_data:
+                if not isinstance(item, dict):
+                    continue
+
+                rec = normalize_from_item(item)
+                if rec:
+                    assessments.append(rec)
+
+            logger.info("Processed %d valid assessments from JSON", len(assessments))
+
+            # write output and return
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            output_path.write_text(json.dumps(assessments, indent=2, ensure_ascii=False), encoding="utf-8")
+
+            logger.info("Saved %d assessments to %s", len(assessments), output_path)
+
+            return assessments
+
+    except requests.RequestException:
+        # Fall back to discovery below if the initial fetch fails
+        pass
+
+    # Default: perform discovery + per-page parsing
+    urls = discover_product_urls(session, max_pages=max_pages)
+
+    logger.info("Discovered %d product URLs", len(urls))
 
     seen = set()
 
@@ -661,10 +926,7 @@ def scrape_catalog(
 
             continue
 
-        record = parse_product_page(
-            normalized,
-            soup,
-        )
+        record = parse_product_page(normalized, soup)
 
         if record:
             assessments.append(record)
@@ -716,6 +978,12 @@ def main():
         default=50,
     )
 
+    parser.add_argument(
+        "--use-json-catalog",
+        action="store_true",
+        help="Use the catalog JSON fast-path (don't fetch individual product pages)",
+    )
+
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -726,6 +994,7 @@ def main():
     scrape_catalog(
         output_path=args.output,
         max_pages=args.max_pages,
+        use_json_catalog=args.use_json_catalog,
     )
 
 
