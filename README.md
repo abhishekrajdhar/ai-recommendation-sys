@@ -56,20 +56,9 @@ python scripts/build_index.py
 
 The scraper handles duplicate URLs, pagination, malformed pages, and missing metadata. It stores:
 
-- name
-- url
-- description
-- assessment type
-- duration
 - remote testing support
 - adaptive support
 - job levels
-- skills measured
-- language support
-- personality/cognitive/technical category
-
-## Run Locally
-
 ```bash
 uvicorn app.main:app --reload
 ```
@@ -86,10 +75,21 @@ Chat request:
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
   -d '{
-    "messages": [
-      {"role": "user", "content": "Hiring a mid-level Java developer with 4 years experience. Need remote technical assessment."}
-    ]
-  }'
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hiring a java backend developer."
+    },
+    {
+      "role": "assistant",
+      "content": "What seniority level are you hiring for this java backend role (Junior, Mid, or Senior)?"
+    },
+    {
+      "role": "user",
+      "content": "Mid-level."
+    }
+  ]
+}'
 ```
 
 Exact response shape:
