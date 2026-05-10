@@ -1,4 +1,4 @@
-#Recommender Agent
+## Recommender Agent
 
 Production-ready FastAPI service for a stateless conversational SHL assessment recommender. It scrapes SHL Individual Test Solutions, indexes the catalog with BM25 plus FAISS semantic retrieval, and uses deterministic agent routing so it clarifies, recommends, refines, compares, or refuses predictably.
 
@@ -72,8 +72,10 @@ curl http://localhost:8000/health
 Chat request:
 
 ```bash
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
+curl -X 'POST' \
+  'http://127.0.0.1:8000/chat' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
   -d '{
   "messages": [
     {
